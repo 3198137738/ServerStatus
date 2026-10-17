@@ -14,7 +14,7 @@ docker-compose.yml     # 编排(project name=sss): srv + web + bot -> 容器 sss
 service/
   bot/{bot.py,Dockerfile}            # Telegram 上下线通知 bot(build)
   web/{index.html,css/app.css,js/app.js,favicon.svg,favicon.ico,Dockerfile}  # 自建前端(照搬 tz.huilang.me 配色 + monitor.seaya.link 系统字体栈), build 进 nginx 镜像
-agent/{client-linux.py,sss-agent.sh,sss-agent.service}  # 被监控机器侧
+agent/{client-linux.py,sss-agent.sh,sss-agent.service,upgrade.sh}  # 被监控机器侧; upgrade.sh 原地升级已装 agent(保留凭据, 失败回滚)
 ```
 
 ## Architecture

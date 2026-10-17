@@ -98,6 +98,17 @@ sudo ./sss.sh
 0. 退出
 ```
 
+# Agent 升级到低流量版
+
+agent 默认每 5s 上报一次、三网探测每 30s 一次(原版都是 1s)，单台流量约从 160MB/天 降到 15MB/天。
+已装过 agent 的机器不用重新填凭据，**每台执行同一条命令**即可(保留原有 SERVER/USER/PASSWORD，失败自动回滚)：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/3198137738/ServerStatus/master/agent/upgrade.sh | sudo bash
+# 自定义间隔(INTERVAL 1~15, 服务端 20s 收不到上报会断开; PING_INTERVAL=0 关闭三网探测):
+curl -fsSL https://raw.githubusercontent.com/3198137738/ServerStatus/master/agent/upgrade.sh | sudo INTERVAL=10 PING_INTERVAL=0 bash
+```
+
 更多信息请移步 https://lidalao.com/archives/87  +1ip
 
 挺好用的？送作者一杯可乐？->
