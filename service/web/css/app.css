@@ -150,9 +150,6 @@ table { width: 100%; border-collapse: collapse; white-space: nowrap; }
 .upbox   { display: inline-block; width: 62px; overflow: hidden; }
 
 /* CONFIG: 上行 系统+架构, 下行 核心数·CPU 型号; 定宽省略, 完整信息在 title 和展开行里 */
-/* 表格铺满时多余宽度会落到这一列, 整列居中避免内容贴左、右侧大片留白; 两行文字在块内仍左对齐 */
-#grid th.c-cfg, #grid td:nth-child(7) { text-align: center; }
-.cfg { text-align: left; }
 .cfg { display: inline-flex; flex-direction: column; gap: 2px; width: 180px; line-height: 1.2; vertical-align: middle; }
 .cfg-os { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cfg-name { color: var(--text); font-size: 12px; min-width: 0; }
