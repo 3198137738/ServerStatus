@@ -18,6 +18,7 @@
 #      经 custom 字段上报为 "loc=JP;virt=kvm", 面板优先显示它们
 #  10. 远程升级: monitors 里 name 为 UPGRADE、host 为 40 位 commit SHA 的项变化时,
 #      用 systemd-run 在独立单元里执行该 commit 的 agent/upgrade.sh
+#  11. 恢复 tcp/udp/进程/线程数(上面 20211117 那次被置 0), 改为读 /proc/net/sockstat 和 /proc/loadavg
 #
 # 用法 (参数均可选, 除 SERVER/USER/PASSWORD 外都有默认值):
 #   python3 client-linux.py SERVER=1.2.3.4 USER=s01 PASSWORD=xxx INTERVAL=5 PING_INTERVAL=30
@@ -93,6 +94,35 @@ def get_hdd():
 def get_cpu_times():
     with open("/proc/stat", "r") as f:
         return [int(x) for x in f.readline().split()[1:5]]
+
+
+def _sockstat_inuse(proto):
+    """/proc/net/sockstat(6) 里某协议的 inuse 之和, 如 'TCP' -> TCP + TCP6"""
+    total = 0
+    for path, key in (('/proc/net/sockstat', proto + ':'), ('/proc/net/sockstat6', proto + '6:')):
+        try:
+            with open(path) as f:
+                for line in f:
+                    parts = line.split()
+                    if parts and parts[0] == key and 'inuse' in parts:
+                        total += int(parts[parts.index('inuse') + 1])
+        except (IOError, OSError, ValueError, IndexError):
+            pass
+    return total
+
+
+def get_tupd():
+    """tcp/udp 连接数、进程数、线程数; 全部读 /proc, 不起子进程(原版每次跑 4 条 ss/ps)"""
+    try:
+        process = sum(1 for d in os.listdir('/proc') if d.isdigit())
+    except OSError:
+        process = 0
+    try:
+        with open('/proc/loadavg') as f:
+            thread = int(f.read().split()[3].split('/')[1])    # "0.00 0.01 0.05 1/123 4567" 里的 123
+    except (IOError, OSError, ValueError, IndexError):
+        thread = 0
+    return _sockstat_inuse('TCP'), _sockstat_inuse('UDP'), process, thread
 
 
 def get_net_bytes():
@@ -496,7 +526,7 @@ if __name__ == '__main__':
                 array['time_10010'] = pingTime['10010']
                 array['time_189'] = pingTime['189']
                 array['time_10086'] = pingTime['10086']
-                array['tcp'] = array['udp'] = array['process'] = array['thread'] = 0
+                array['tcp'], array['udp'], array['process'], array['thread'] = get_tupd()
                 # 服务端每次用整条上报替换旧值, 所以 custom 每次都要带
                 array['custom'] = agent_custom()
 
