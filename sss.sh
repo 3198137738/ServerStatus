@@ -82,12 +82,21 @@ ensure_config() {
     [ -f "$CONFIG_FILE" ] || echo '{"servers":[]}' > "$CONFIG_FILE"
 }
 
+# 结果缓存在 PANEL_IP 里; 必须在当前 shell 调用(不要 $(get_ip)), 否则缓存留在子 shell,
+# 「查看全部」时每个节点都会重新请求一次 ipify
 PANEL_IP=""
 get_ip() {
-    [ -n "$PANEL_IP" ] && { printf '%s' "$PANEL_IP"; return; }
+    [ -n "$PANEL_IP" ] && return
     PANEL_IP=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null)
     [ -z "$PANEL_IP" ] && PANEL_IP="<本机IP>"
-    printf '%s' "$PANEL_IP"
+}
+
+# 按终端显示宽度左对齐: printf 的 %-Ns 按字节计, 中文(UTF-8 3 字节, 占 2 列)会错位
+# 按字节算, 不依赖系统 locale: 非 ASCII 字节按「3 字节 = 2 列」(CJK) 折算
+pad() {
+    local s="$1" w="$2" width
+    width=$(LC_ALL=C; non="${s//[ -~]/}"; printf '%s' $(( ${#s} - ${#non} + ${#non} * 2 / 3 )))
+    printf '%s%*s' "$s" $(( w > width ? w - width : 0 )) ''
 }
 
 gen_user() {
@@ -123,11 +132,11 @@ restart_stack() {
 }
 
 print_agent_cmd() {
-    local user="$1" pass="$2" ip
-    ip=$(get_ip)
+    local user="$1" pass="$2"
+    get_ip
     echo
     line
-    printf '%s\n' "${green}curl -L ${GITHUB_RAW_URL}/agent/sss-agent.sh -o sss-agent.sh && chmod +x sss-agent.sh && sudo ./sss-agent.sh ${ip} ${user} ${pass}${plain}"
+    printf '%s\n' "${green}curl -L ${GITHUB_RAW_URL}/agent/sss-agent.sh -o sss-agent.sh && chmod +x sss-agent.sh && sudo ./sss-agent.sh ${PANEL_IP} ${user} ${pass}${plain}"
     line
 }
 
@@ -144,7 +153,7 @@ list_nodes() {
     line
     jq -r '.servers | to_entries[] | "\(.key)|\(.value.name)|\(.value.location)|\(.value.type)"' "$CONFIG_FILE" |
     while IFS='|' read -r id name loc type; do
-        printf "  %-5s %-18s %-10s %-8s\n" "$id" "$name" "$loc" "$type"
+        printf "  %-5s %s %-10s %-8s\n" "$id" "$(pad "$name" 18)" "$loc" "$type"
     done
 }
 
@@ -305,7 +314,6 @@ menu_loop() {
 }
 
 # ================= 入口 =================
-clear 2>/dev/null
-banner
+# banner 由 menu_loop 每轮自己 clear + 打印, 这里再打一次会在回滚区里出现两份
 pre_check
 menu_loop
