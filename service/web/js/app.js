@@ -341,9 +341,30 @@
     });
   }
 
+  /* ----------------- 前端更新后自动刷新 ----------------- */
+  // 面板是单页轮询, 标签页开着就永远跑旧的 app.js; 每分钟 HEAD 一下静态资源,
+  // ETag/Last-Modified 变了就 reload。只取响应头, 没有正文
+  var ASSETS = ['js/app.js', 'css/app.css'];
+  var assetSig = {};
+  function checkAssets() {
+    ASSETS.forEach(function (url) {
+      fetch(url + '?_=' + Date.now(), { method: 'HEAD', cache: 'no-store' })
+        .then(function (r) {
+          if (!r.ok) return;
+          var sig = r.headers.get('ETag') || r.headers.get('Last-Modified');
+          if (!sig) return;
+          if (assetSig[url] && assetSig[url] !== sig) location.reload();
+          assetSig[url] = sig;
+        })
+        .catch(function () { /* 网络抖动, 下次再查 */ });
+    });
+  }
+
   /* ----------------- boot ----------------- */
   initTheme();
   initExpand();
   tick();
   setInterval(tick, 5000);   // agent 每 5s 上报一次, 拉得再勤也只是重复数据
+  checkAssets();
+  setInterval(checkAssets, 60000);
 })();
