@@ -270,7 +270,8 @@ def start_ping_threads():
 
 
 agentInfo = {'loc': '', 'virt': ''}
-VIRT_ALIASES = {'amazon': 'kvm', 'microsoft': 'hyperv', 'none': 'dedicated'}
+# 直接显示 systemd-detect-virt 的原始值 (kvm/amazon/microsoft/xen/openvz/lxc...), 只把物理机的 none 改成 dedicated
+VIRT_ALIASES = {'none': 'dedicated'}
 
 
 def detect_location():
