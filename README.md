@@ -13,7 +13,7 @@
 服务端需要 **docker**（没有就 `curl -sL https://get.docker.com | bash`）和 **jq**（`apt install -y jq`，只有节点管理脚本用得到）。
 
 ```bash
-git clone https://github.com/lidalao/ServerStatus.git sss && cd sss
+git clone https://github.com/3198137738/ServerStatus.git sss && cd sss
 
 # 1. 填配置
 cp .env.sample .env
@@ -58,7 +58,7 @@ git pull && docker compose up -d --build
 
 ```bash
 # 在老目录(假设叫 sss)的上级执行
-git clone https://github.com/lidalao/ServerStatus.git sss-new
+git clone https://github.com/3198137738/ServerStatus.git sss-new
 cp sss/config.json sss-new/          # 节点数据: 每个节点的用户名密码都在里面, 丢了要挨台重装 agent
 
 cd sss-new

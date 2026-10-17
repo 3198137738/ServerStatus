@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 # coding: utf-8
 # Create by : https://github.com/cppla/ServerStatus
-# 版本：1.0.2, 支持Python版本：2.7 to 3.9
-# 支持操作系统： Linux, OSX, FreeBSD, OpenBSD and NetBSD, both 32-bit and 64-bit architectures
-# 说明: 默认情况下修改server和user就可以了。丢包率监测方向可以自定义，例如：CU = "www.facebook.com"。
-#
+# 低流量版 (Update by: https://github.com/3198137738/ServerStatus), 支持Python版本：2.7 to 3.x
 # 20211117: 移除tupd信息 (Update by: https://github.com/lidalao/ServerStatus)
 #
+# 与原版的区别:
+#   1. 上报间隔 INTERVAL 默认 5s (原版 1s), CPU 取整个间隔内的平均值
+#   2. 三网探测间隔 PING_INTERVAL 默认 30s (原版 1s), PING_INTERVAL=0 关闭探测
+#   3. 双栈检测 (连 google) 间隔 ONLINE_CHECK_INTERVAL 默认 300s (原版约 10s)
+#   4. 探测目标 DNS 解析失败时不再每次连接都重新解析, 而是每 10 分钟重试一次
+#   5. 网速改为在主循环里按 /proc/net/dev 差值计算, 去掉单独的线程
+#   6. 参数按 KEY=VALUE 精确解析 (原版用子串匹配, PING_INTERVAL 会被当成 INTERVAL)
+#
+# 用法 (参数均可选, 除 SERVER/USER/PASSWORD 外都有默认值):
+#   python3 client-linux.py SERVER=1.2.3.4 USER=s01 PASSWORD=xxx INTERVAL=5 PING_INTERVAL=30
 
 SERVER = "127.0.0.1"
 USER = "s01"
-
-
-
 PORT = 35601
 PASSWORD = "USER_DEFAULT_PASSWORD"
-INTERVAL = 1
+INTERVAL = 5                  # 上报间隔(秒)
+PING_INTERVAL = 30            # 三网 TCP 探测间隔(秒), 0 = 关闭
+ONLINE_CHECK_INTERVAL = 300   # IPv4/IPv6 连通性检测间隔(秒)
 PROBEPORT = 80
 PROBE_PROTOCOL_PREFER = "ipv4"  # ipv4, ipv6
 PING_PACKET_HISTORY_LEN = 100
+PING_MIN_SAMPLES = 10         # 至少这么多样本才计算丢包率 (原版 30, 间隔拉长后太慢)
+DNS_RETRY_INTERVAL = 600
 CU = "cu.tz.cloudcpp.com"
 CT = "ct.tz.cloudcpp.com"
 CM = "cm.tz.cloudcpp.com"
@@ -38,141 +46,99 @@ try:
 except ImportError:
     from Queue import Queue     # python2
 
+SKIP_IFACES = ('lo', 'tun', 'docker', 'veth', 'br-', 'vmbr', 'vnet', 'kube')
+
+
 def get_uptime():
     with open('/proc/uptime', 'r') as f:
-        uptime = f.readline().split('.', 2)
-        return int(uptime[0])
+        return int(f.readline().split('.', 2)[0])
+
 
 def get_memory():
     re_parser = re.compile(r'^(?P<key>\S*):\s*(?P<value>\d*)\s*kB')
     result = dict()
-    for line in open('/proc/meminfo'):
-        match = re_parser.match(line)
-        if not match:
-            continue
-        key, value = match.groups(['key', 'value'])
-        result[key] = int(value)
+    with open('/proc/meminfo') as f:
+        for line in f:
+            match = re_parser.match(line)
+            if match:
+                key, value = match.groups()
+                result[key] = int(value)
     MemTotal = float(result['MemTotal'])
-    MemUsed = MemTotal-float(result['MemFree'])-float(result['Buffers'])-float(result['Cached'])-float(result['SReclaimable'])
+    MemUsed = MemTotal - float(result['MemFree']) - float(result['Buffers']) - float(result['Cached']) - float(result['SReclaimable'])
     SwapTotal = float(result['SwapTotal'])
     SwapFree = float(result['SwapFree'])
     return int(MemTotal), int(MemUsed), int(SwapTotal), int(SwapFree)
 
+
 def get_hdd():
-    p = subprocess.check_output(['df', '-Tlm', '--total', '-t', 'ext4', '-t', 'ext3', '-t', 'ext2', '-t', 'reiserfs', '-t', 'jfs', '-t', 'ntfs', '-t', 'fat32', '-t', 'btrfs', '-t', 'fuseblk', '-t', 'zfs', '-t', 'simfs', '-t', 'xfs']).decode("Utf-8")
-    total = p.splitlines()[-1]
-    used = total.split()[3]
-    size = total.split()[2]
-    return int(size), int(used)
+    p = subprocess.check_output(['df', '-Tlm', '--total', '-t', 'ext4', '-t', 'ext3', '-t', 'ext2', '-t', 'reiserfs', '-t', 'jfs', '-t', 'ntfs', '-t', 'fat32', '-t', 'btrfs', '-t', 'fuseblk', '-t', 'zfs', '-t', 'simfs', '-t', 'xfs']).decode("utf-8")
+    total = p.splitlines()[-1].split()
+    return int(total[2]), int(total[3])
 
-def get_time():
+
+def get_cpu_times():
     with open("/proc/stat", "r") as f:
-        time_list = f.readline().split(' ')[2:6]
-        for i in range(len(time_list))  :
-            time_list[i] = int(time_list[i])
-        return time_list
+        return [int(x) for x in f.readline().split()[1:5]]
 
-def delta_time():
-    x = get_time()
-    time.sleep(INTERVAL)
-    y = get_time()
-    for i in range(len(x)):
-        y[i]-=x[i]
-    return y
 
-def get_cpu():
-    t = delta_time()
-    st = sum(t)
-    if st == 0:
-        st = 1
-    result = 100-(t[len(t)-1]*100.00/st)
-    return round(result, 1)
-
-def liuliang():
-    NET_IN = 0
-    NET_OUT = 0
+def get_net_bytes():
+    """返回所有物理网卡的 (累计接收, 累计发送) 字节数"""
+    rx = tx = 0
     with open('/proc/net/dev') as f:
-        for line in f.readlines():
-            netinfo = re.findall('([^\s]+):[\s]{0,}(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', line)
-            if netinfo:
-                if netinfo[0][0] == 'lo' or 'tun' in netinfo[0][0] \
-                        or 'docker' in netinfo[0][0] or 'veth' in netinfo[0][0] \
-                        or 'br-' in netinfo[0][0] or 'vmbr' in netinfo[0][0] \
-                        or 'vnet' in netinfo[0][0] or 'kube' in netinfo[0][0] \
-                        or netinfo[0][1]=='0' or netinfo[0][9]=='0':
-                    continue
-                else:
-                    NET_IN += int(netinfo[0][1])
-                    NET_OUT += int(netinfo[0][9])
-    return NET_IN, NET_OUT
+        for line in f.readlines()[2:]:
+            name, data = line.split(':', 1)
+            name = name.strip()
+            if any(s in name for s in SKIP_IFACES):
+                continue
+            fields = data.split()
+            rx += int(fields[0])
+            tx += int(fields[8])
+    return rx, tx
 
-def tupd():
-    '''
-    tcp, udp, process, thread count: for view ddcc attack , then send warning
-    :return:
-    '''
-    return 0,0,0,0
-    
-    s = subprocess.check_output("ss -t|wc -l", shell=True)
-    t = int(s[:-1])-1
-    s = subprocess.check_output("ss -u|wc -l", shell=True)
-    u = int(s[:-1])-1
-    s = subprocess.check_output("ps -ef|wc -l", shell=True)
-    p = int(s[:-1])-2
-    s = subprocess.check_output("ps -eLf|wc -l", shell=True)
-    d = int(s[:-1])-2
-    return t,u,p,d
 
 def get_network(ip_version):
-    if(ip_version == 4):
-        HOST = "ipv4.google.com"
-    elif(ip_version == 6):
-        HOST = "ipv6.google.com"
+    host = "ipv4.google.com" if ip_version == 4 else "ipv6.google.com"
     try:
-        socket.create_connection((HOST, 80), 2).close()
+        socket.create_connection((host, 80), 2).close()
         return True
-    except:
+    except Exception:
         return False
 
-lostRate = {
-    '10010': 0.0,
-    '189': 0.0,
-    '10086': 0.0
-}
-pingTime = {
-    '10010': 0,
-    '189': 0,
-    '10086': 0
-}
-netSpeed = {
-    'netrx': 0.0,
-    'nettx': 0.0,
-    'clock': 0.0,
-    'diff': 0.0,
-    'avgrx': 0,
-    'avgtx': 0
-}
+
+lostRate = {'10010': 0.0, '189': 0.0, '10086': 0.0}
+pingTime = {'10010': 0, '189': 0, '10086': 0}
+
+
+def _resolve(host):
+    if host.count(':') >= 1:    # 纯 IPv6 地址
+        return host
+    family = socket.AF_INET if PROBE_PROTOCOL_PREFER == 'ipv4' else socket.AF_INET6
+    try:
+        return socket.getaddrinfo(host, None, family)[0][4][0]
+    except Exception:
+        return None
+
 
 def _ping_thread(host, mark, port):
     lostPacket = 0
     packet_queue = Queue(maxsize=PING_PACKET_HISTORY_LEN)
-
-    IP = host
-    if host.count(':') < 1:     # if not plain ipv6 address, means ipv4 address or hostname
-        try:
-            if PROBE_PROTOCOL_PREFER == 'ipv4':
-                IP = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
-            else:
-                IP = socket.getaddrinfo(host, None, socket.AF_INET6)[0][4][0]
-        except Exception:
-                pass
+    IP = None
+    last_resolve = 0
 
     while True:
+        # 解析失败时不要把域名直接丢给 create_connection, 否则每次探测都会多一次 DNS 查询
+        if IP is None and time.time() - last_resolve >= DNS_RETRY_INTERVAL:
+            IP = _resolve(host)
+            last_resolve = time.time()
+        if IP is None:
+            time.sleep(PING_INTERVAL)
+            continue
+
         if packet_queue.full():
             if packet_queue.get() == 0:
                 lostPacket -= 1
+        b = timeit.default_timer()
         try:
-            b = timeit.default_timer()
             socket.create_connection((IP, port), timeout=1).close()
             pingTime[mark] = int((timeit.default_timer() - b) * 1000)
             packet_queue.put(1)
@@ -180,105 +146,60 @@ def _ping_thread(host, mark, port):
             if error.errno == errno.ECONNREFUSED:
                 pingTime[mark] = int((timeit.default_timer() - b) * 1000)
                 packet_queue.put(1)
-            #elif error.errno == errno.ETIMEDOUT:
             else:
                 lostPacket += 1
                 packet_queue.put(0)
 
-        if packet_queue.qsize() > 30:
+        if packet_queue.qsize() >= PING_MIN_SAMPLES:
             lostRate[mark] = float(lostPacket) / packet_queue.qsize()
 
-        time.sleep(INTERVAL)
+        time.sleep(PING_INTERVAL)
 
-def _net_speed():
-    while True:
-        with open("/proc/net/dev", "r") as f:
-            net_dev = f.readlines()
-            avgrx = 0
-            avgtx = 0
-            for dev in net_dev[2:]:
-                dev = dev.split(':')
-                if "lo" in dev[0] or "tun" in dev[0] \
-                        or "docker" in dev[0] or "veth" in dev[0] \
-                        or "br-" in dev[0] or "vmbr" in dev[0] \
-                        or "vnet" in dev[0] or "kube" in dev[0]:
-                    continue
-                dev = dev[1].split()
-                avgrx += int(dev[0])
-                avgtx += int(dev[8])
-            now_clock = time.time()
-            netSpeed["diff"] = now_clock - netSpeed["clock"]
-            netSpeed["clock"] = now_clock
-            netSpeed["netrx"] = int((avgrx - netSpeed["avgrx"]) / netSpeed["diff"])
-            netSpeed["nettx"] = int((avgtx - netSpeed["avgtx"]) / netSpeed["diff"])
-            netSpeed["avgrx"] = avgrx
-            netSpeed["avgtx"] = avgtx
-        time.sleep(INTERVAL)
 
-def get_realtime_date():
-    t1 = threading.Thread(
-        target=_ping_thread,
-        kwargs={
-            'host': CU,
-            'mark': '10010',
-            'port': PROBEPORT
-        }
-    )
-    t2 = threading.Thread(
-        target=_ping_thread,
-        kwargs={
-            'host': CT,
-            'mark': '189',
-            'port': PROBEPORT
-        }
-    )
-    t3 = threading.Thread(
-        target=_ping_thread,
-        kwargs={
-            'host': CM,
-            'mark': '10086',
-            'port': PROBEPORT
-        }
-    )
-    t4 = threading.Thread(
-        target=_net_speed,
-    )
-    t1.setDaemon(True)
-    t2.setDaemon(True)
-    t3.setDaemon(True)
-    t4.setDaemon(True)
-    t1.start()
-    t2.start()
-    t3.start()
-    t4.start()
+def start_ping_threads():
+    if PING_INTERVAL <= 0:
+        return
+    for host, mark in ((CU, '10010'), (CT, '189'), (CM, '10086')):
+        t = threading.Thread(target=_ping_thread, kwargs={'host': host, 'mark': mark, 'port': PROBEPORT})
+        t.daemon = True
+        t.start()
 
-def byte_str(object):
-    '''
-    bytes to str, str to bytes
-    :param object:
-    :return:
-    '''
-    if isinstance(object, str):
-        return object.encode(encoding="utf-8")
-    elif isinstance(object, bytes):
-        return bytes.decode(object)
-    else:
-        print(type(object))
+
+def byte_str(obj):
+    if isinstance(obj, str):
+        return obj.encode(encoding="utf-8")
+    elif isinstance(obj, bytes):
+        return bytes.decode(obj)
+    print(type(obj))
+
+
+def parse_args():
+    global SERVER, PORT, USER, PASSWORD, INTERVAL, PING_INTERVAL, ONLINE_CHECK_INTERVAL
+    for arg in sys.argv[1:]:
+        if '=' not in arg:
+            continue
+        key, value = arg.split('=', 1)
+        key = key.upper()
+        if key == 'SERVER':
+            SERVER = value
+        elif key == 'PORT':
+            PORT = int(value)
+        elif key == 'USER':
+            USER = value
+        elif key == 'PASSWORD':
+            PASSWORD = value
+        elif key == 'INTERVAL':
+            INTERVAL = max(1, int(value))
+        elif key == 'PING_INTERVAL':
+            PING_INTERVAL = int(value)
+        elif key == 'ONLINE_CHECK_INTERVAL':
+            ONLINE_CHECK_INTERVAL = max(10, int(value))
+
 
 if __name__ == '__main__':
-    for argc in sys.argv:
-        if 'SERVER' in argc:
-            SERVER = argc.split('SERVER=')[-1]
-        elif 'PORT' in argc:
-            PORT = int(argc.split('PORT=')[-1])
-        elif 'USER' in argc:
-            USER = argc.split('USER=')[-1]
-        elif 'PASSWORD' in argc:
-            PASSWORD = argc.split('PASSWORD=')[-1]
-        elif 'INTERVAL' in argc:
-            INTERVAL = int(argc.split('INTERVAL=')[-1])
+    parse_args()
     socket.setdefaulttimeout(30)
-    get_realtime_date()
+    start_ping_threads()
     while True:
         try:
             print("Connecting...")
@@ -299,8 +220,6 @@ if __name__ == '__main__':
                 data = byte_str(s.recv(1024))
                 print(data)
 
-            timer = 0
-            check_ip = 0
             if data.find("IPv4") > -1:
                 check_ip = 6
             elif data.find("IPv6") > -1:
@@ -309,22 +228,38 @@ if __name__ == '__main__':
                 print(data)
                 raise socket.error
 
+            last_online_check = 0
+            prev_cpu = get_cpu_times()
+            prev_rx, prev_tx = get_net_bytes()
+            prev_clock = time.time()
+
             while True:
-                CPU = get_cpu()
-                NET_IN, NET_OUT = liuliang()
-                Uptime = get_uptime()
+                time.sleep(INTERVAL)
+
+                # CPU / 网速都取本次上报间隔内的平均值
+                cur_cpu = get_cpu_times()
+                delta = [c - p for c, p in zip(cur_cpu, prev_cpu)]
+                prev_cpu = cur_cpu
+                st = sum(delta) or 1
+                CPU = round(100 - (delta[3] * 100.0 / st), 1)
+
+                NET_IN, NET_OUT = get_net_bytes()
+                now = time.time()
+                diff = (now - prev_clock) or 1
+                netrx = int((NET_IN - prev_rx) / diff)
+                nettx = int((NET_OUT - prev_tx) / diff)
+                prev_rx, prev_tx, prev_clock = NET_IN, NET_OUT, now
+
                 Load_1, Load_5, Load_15 = os.getloadavg()
                 MemoryTotal, MemoryUsed, SwapTotal, SwapFree = get_memory()
                 HDDTotal, HDDUsed = get_hdd()
 
                 array = {}
-                if not timer:
+                if now - last_online_check >= ONLINE_CHECK_INTERVAL:
                     array['online' + str(check_ip)] = get_network(check_ip)
-                    timer = 10
-                else:
-                    timer -= 1*INTERVAL
+                    last_online_check = now
 
-                array['uptime'] = Uptime
+                array['uptime'] = get_uptime()
                 array['load_1'] = Load_1
                 array['load_5'] = Load_5
                 array['load_15'] = Load_15
@@ -335,21 +270,21 @@ if __name__ == '__main__':
                 array['hdd_total'] = HDDTotal
                 array['hdd_used'] = HDDUsed
                 array['cpu'] = CPU
-                array['network_rx'] = netSpeed.get("netrx")
-                array['network_tx'] = netSpeed.get("nettx")
+                array['network_rx'] = netrx
+                array['network_tx'] = nettx
                 array['network_in'] = NET_IN
                 array['network_out'] = NET_OUT
-                # todo：兼容旧版本，下个版本删除ip_status
                 array['ip_status'] = True
-                array['ping_10010'] = lostRate.get('10010') * 100
-                array['ping_189'] = lostRate.get('189') * 100
-                array['ping_10086'] = lostRate.get('10086') * 100
-                array['time_10010'] = pingTime.get('10010')
-                array['time_189'] = pingTime.get('189')
-                array['time_10086'] = pingTime.get('10086')
-                array['tcp'], array['udp'], array['process'], array['thread'] = tupd()
+                array['ping_10010'] = lostRate['10010'] * 100
+                array['ping_189'] = lostRate['189'] * 100
+                array['ping_10086'] = lostRate['10086'] * 100
+                array['time_10010'] = pingTime['10010']
+                array['time_189'] = pingTime['189']
+                array['time_10086'] = pingTime['10086']
+                array['tcp'] = array['udp'] = array['process'] = array['thread'] = 0
 
-                s.send(byte_str("update " + json.dumps(array) + "\n"))
+                # separators 去掉多余空格, 每条约省 50 字节
+                s.send(byte_str("update " + json.dumps(array, separators=(',', ':')) + "\n"))
         except KeyboardInterrupt:
             raise
         except socket.error:

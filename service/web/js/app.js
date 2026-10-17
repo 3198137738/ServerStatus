@@ -316,5 +316,5 @@
   initTheme();
   initExpand();
   tick();
-  setInterval(tick, 1500);
+  setInterval(tick, 5000);   // agent 每 5s 上报一次, 拉得再勤也只是重复数据
 })();

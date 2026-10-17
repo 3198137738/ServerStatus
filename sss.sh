@@ -7,7 +7,7 @@
 #   Github: https://github.com/lidalao/ServerStatus
 #========================================================
 
-GITHUB_RAW_URL="https://raw.githubusercontent.com/lidalao/ServerStatus/master"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/3198137738/ServerStatus/master"
 CONFIG_FILE="config.json"
 
 # 始终在脚本(仓库)所在目录下操作, 允许从任意路径调用

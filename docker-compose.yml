@@ -1,13 +1,14 @@
 name: sss
 
 services:
-  # ServerStatus server: 接收 agent 上报(35601), 生成 json/stats.json
+  # ServerStatus server (cppla 2.0, Go): 接收 agent 上报(35601), 容器内 :80 提供实时 /json/stats.json;
+  # json/stats.json 落盘每分钟一次, 仅用于重启后恢复数据
   srv:
     image: cppla/serverstatus:latest
     restart: unless-stopped
     volumes:
-      - ./config.json:/ServerStatus/server/config.json
-      - ./json:/usr/share/nginx/html/json
+      - ./config.json:/app/config/config.json
+      - ./json:/app/data
     ports:
       - ${REPORT_PORT:-35601}:35601
 

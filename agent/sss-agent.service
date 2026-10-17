@@ -14,7 +14,8 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/opt/sss/agent/
-ExecStart=/usr/bin/python3 /opt/sss/agent/client-linux.py SERVER=sss_host USER=sss_user PASSWORD=sss_pass
+# INTERVAL: 上报间隔(秒); PING_INTERVAL: 三网探测间隔(秒), 0 = 关闭探测
+ExecStart=/usr/bin/python3 /opt/sss/agent/client-linux.py SERVER=sss_host USER=sss_user PASSWORD=sss_pass INTERVAL=5 PING_INTERVAL=30
 Restart=always
 #Environment=DEBUG=true
 
