@@ -95,6 +95,7 @@ sudo ./sss.sh
 2. 添加节点   随机生成凭据, 加完直接给出 agent 安装命令
 3. 删除节点
 4. 更新节点   改名字/位置/类型/月流量起始日
+5. 远程升级所有 agent   下发当前 commit, 在线 agent 自动升级
 0. 退出
 ```
 
@@ -128,6 +129,27 @@ docker compose restart srv
 - `interval`: 探测间隔(秒), **一定要写**, 不写服务端会默认成 600
 - 删掉某项(或整个 `monitors`)再重启 srv, 那一路就回到 agent 内置的默认目标
 - 需要 agent 是低流量版(`upgrade.sh` 装的), 且启动参数 `PING_INTERVAL` 不为 0
+
+# 地区 / 类型自动检测
+
+agent 会自动检测出口 IP 所在国家(Cloudflare trace, 如 `JP`)和虚拟化类型(`systemd-detect-virt`, 如 `kvm`),
+面板的 REGION / TYPE 列优先显示检测值; 节点离线时显示浏览器缓存的最后一次检测值, 再没有才用 `config.json` 里手填的。
+
+# 远程升级所有 agent
+
+在主控上把仓库更新到最新, 然后 `sudo ./sss.sh` → `5. 远程升级所有 agent`:
+
+```bash
+git pull && docker compose up -d --build
+sudo ./sss.sh      # 选 5
+```
+
+它会把当前 commit SHA 写进 `config.json` 的 `monitors`(`{"name":"UPGRADE","host":"<SHA>"}`)并重启 srv,
+每台在线 agent 重连时发现 SHA 变了, 就用 `systemd-run` 拉取**该 commit** 的 `agent/upgrade.sh` 自行升级(失败自动回滚, 保留原有间隔参数)。
+
+- 每个 SHA 只触发一次; 刚装上的 agent 第一次见到 UPGRADE 只记录基线, 不会重复升级
+- 只认 40 位 commit SHA, 代码固定来自本仓库(`agent/client-linux.py` 里的 `GITHUB_RAW_BASE`)
+- **安全提示**: 这等于所有被监控机以 root 信任本 GitHub 仓库和主控的 `config.json`, 请保护好 GitHub 账号和主控
 
 更多信息请移步 https://lidalao.com/archives/87  +1ip
 

@@ -11,6 +11,8 @@ After=syslog.target
 #LimitMEMLOCK=infinity
 #LimitNOFILE=65535
 Type=simple
+# 关掉 Python 输出缓冲, journalctl -u sss-agent 才能实时看到日志
+Environment=PYTHONUNBUFFERED=1
 User=root
 Group=root
 WorkingDirectory=/opt/sss/agent/

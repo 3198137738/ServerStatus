@@ -148,8 +148,36 @@
   // 索引 9/10/11 = CPU/RAM/DISK 进度条列(就地更新, 不走 innerHTML)
   var GAUGE_COL = { 9: 'cpu', 10: 'ram', 11: 'disk' };
 
+  /* agent 自动检测的地区/虚拟化类型经 custom 上报为 "loc=JP;virt=kvm";
+     离线时服务端不下发 custom, 用 localStorage 里最后一次的值, 再没有才用 config.json 手填的 */
+  var AUTO_KEY = 'autoInfo';
+  var autoCache = (function () {
+    try { return JSON.parse(localStorage.getItem(AUTO_KEY)) || {}; } catch (e) { return {}; }
+  })();
+  var autoDirty = false;
+
+  function autoInfo(s) {
+    var name = s.name || '', got = {};
+    String(s.custom || '').split(';').forEach(function (kv) {
+      var i = kv.indexOf('=');
+      if (i > 0) got[kv.slice(0, i)] = kv.slice(i + 1);
+    });
+    var cached = autoCache[name] || {};
+    if ((got.loc && got.loc !== cached.loc) || (got.virt && got.virt !== cached.virt)) {
+      autoCache[name] = { loc: got.loc || cached.loc, virt: got.virt || cached.virt };
+      autoDirty = true;
+    }
+    return autoCache[name] || {};
+  }
+  function saveAutoCache() {
+    if (!autoDirty) return;
+    autoDirty = false;
+    try { localStorage.setItem(AUTO_KEY, JSON.stringify(autoCache)); } catch (e) { /* 隐私模式等 */ }
+  }
+
   function computeCells(s) {
     var online = !!(s.online4 || s.online6);
+    var auto = autoInfo(s);
     var memPct = pct(s.memory_used, s.memory_total);
     var hddPct = pct(s.hdd_used, s.hdd_total);
     var mIn = (Number(s.network_in) || 0) - (Number(s.last_network_in) || 0);
@@ -162,8 +190,8 @@
         '<span class="name">' + esc(s.name || '-') + '</span>',
         protocolCell(s, online),
         '<span class="numbox">' + vduo(mIn, mOut, humanBytes) + '</span>',
-        '<span class="type-tag">' + esc(s.type || '-') + '</span>',
-        regionCell(s.location),
+        '<span class="type-tag">' + esc(auto.virt || s.type || '-') + '</span>',
+        regionCell(auto.loc || s.location),
         '<span class="mono dim upbox">' + esc(fmtUptime(s.uptime)) + '</span>',
         '<span class="mono loadbox">' + load + '</span>',
         '<span class="netbox">' + (online ? vduo(s.network_rx, s.network_tx, humanSpeed) : '<span class="dim">-</span>') + '</span>',
@@ -253,6 +281,7 @@
 
     applyExpanded();
     requestAnimationFrame(flushNewBars);
+    saveAutoCache();
   }
 
   function tick() {

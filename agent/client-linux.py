@@ -14,6 +14,10 @@
 #   7. 三网探测改为山西联通/电信/移动, 优先 IPv6, 不通自动退回 IPv4
 #   8. 探测目标可由主控下发: config.json 的 monitors 里 name 为 CU/CT/CM 的项,
 #      host 写逗号分隔的候选(可带 :port), interval 为探测间隔; 改完 restart srv 即生效
+#   9. 自动检测地区(Cloudflare trace 的 loc, 如 JP)和虚拟化类型(systemd-detect-virt),
+#      经 custom 字段上报为 "loc=JP;virt=kvm", 面板优先显示它们
+#  10. 远程升级: monitors 里 name 为 UPGRADE、host 为 40 位 commit SHA 的项变化时,
+#      用 systemd-run 在独立单元里执行该 commit 的 agent/upgrade.sh
 #
 # 用法 (参数均可选, 除 SERVER/USER/PASSWORD 外都有默认值):
 #   python3 client-linux.py SERVER=1.2.3.4 USER=s01 PASSWORD=xxx INTERVAL=5 PING_INTERVAL=30
@@ -34,6 +38,8 @@ DNS_RETRY_INTERVAL = 600      # 每隔这么久重新解析/选择探测目标
 CU = ("sx-cu-v6.ip.zstaticcdn.com", "sx-cu-v4.ip.zstaticcdn.com")
 CT = ("sx-ct-v6.ip.zstaticcdn.com", "sx-ct-v4.ip.zstaticcdn.com")
 CM = ("sx-cm-v6.ip.zstaticcdn.com", "sx-cm-v4.ip.zstaticcdn.com")
+LOCATION_REFRESH = 21600      # 地区每 6 小时重新检测一次, 失败 10 分钟后重试
+GITHUB_RAW_BASE = "https://raw.githubusercontent.com/3198137738/ServerStatus"
 
 import socket
 import time
@@ -49,6 +55,10 @@ try:
     from queue import Queue     # python3
 except ImportError:
     from Queue import Queue     # python2
+try:
+    from urllib.request import urlopen      # python3
+except ImportError:
+    from urllib2 import urlopen             # python2
 
 SKIP_IFACES = ('lo', 'tun', 'docker', 'veth', 'br-', 'vmbr', 'vnet', 'kube')
 
@@ -259,6 +269,106 @@ def start_ping_threads():
         t.start()
 
 
+agentInfo = {'loc': '', 'virt': ''}
+VIRT_ALIASES = {'amazon': 'kvm', 'microsoft': 'hyperv', 'none': 'dedicated'}
+
+
+def detect_location():
+    """出口 IP 所在国家, 两位大写代码; 失败返回 None"""
+    for url in ("https://www.cloudflare.com/cdn-cgi/trace", "https://1.1.1.1/cdn-cgi/trace"):
+        try:
+            body = urlopen(url, timeout=5).read().decode('utf-8', 'ignore')
+        except Exception:
+            continue
+        for line in body.splitlines():
+            if line.startswith('loc='):
+                loc = line[4:].strip().upper()
+                if re.match(r'^[A-Z]{2}$', loc) and loc != 'XX':
+                    return loc
+    return None
+
+
+def detect_virt():
+    try:
+        out = subprocess.check_output(['systemd-detect-virt'], stderr=open(os.devnull, 'w'))
+    except subprocess.CalledProcessError as e:
+        out = e.output      # 物理机输出 none 且退出码为 1
+    except Exception:
+        out = b''
+    virt = out.decode('utf-8', 'ignore').strip().lower() if isinstance(out, bytes) else str(out).strip().lower()
+    if not virt:
+        if os.path.exists('/proc/user_beancounters') or os.path.exists('/proc/vz'):
+            virt = 'openvz'
+        else:
+            return ''
+    return VIRT_ALIASES.get(virt, virt)
+
+
+def _location_thread():
+    while True:
+        loc = detect_location()
+        if loc:
+            agentInfo['loc'] = loc
+        time.sleep(LOCATION_REFRESH if loc else 600)
+
+
+def start_info_detection():
+    agentInfo['virt'] = detect_virt()
+    t = threading.Thread(target=_location_thread)
+    t.daemon = True
+    t.start()
+
+
+def agent_custom():
+    return ';'.join('%s=%s' % (k, agentInfo[k]) for k in ('loc', 'virt') if agentInfo[k])
+
+
+UPGRADE_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'upgrade.token')
+
+
+def handle_upgrade(lines):
+    """monitors 里 UPGRADE 的 host(commit SHA) 与上次见过的不同就升级; 每个 SHA 只触发一次"""
+    token = None
+    for line in lines:
+        line = line.strip()
+        if not line.startswith('{'):
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if str(item.get('name', '')).strip().upper() == 'UPGRADE':
+            token = str(item.get('host', '')).strip().lower()
+    if not token:
+        return
+    if not re.match(r'^[0-9a-f]{40}$', token):
+        print("upgrade: ignore %r, host must be a full 40-char commit SHA" % token)
+        return
+    try:
+        with open(UPGRADE_TOKEN_FILE) as f:
+            seen = f.read().strip()
+    except IOError:
+        seen = None
+    if seen == token:
+        return
+    with open(UPGRADE_TOKEN_FILE, 'w') as f:
+        f.write(token + '\n')
+    if seen is None:
+        # 首次运行(刚手动装/升级完)只记下基线, 不重复升级
+        print("upgrade: baseline %s" % token)
+        return
+    # upgrade.sh 会重启 sss-agent; 必须放到独立的 transient unit 里跑,
+    # 否则它作为本服务的子进程会被一起杀掉, 来不及做存活检查和回滚
+    url = "%s/%s/agent/upgrade.sh" % (GITHUB_RAW_BASE, token)
+    cmd = ['systemd-run', '--unit=sss-agent-upgrade-' + token[:12], '--setenv=GITHUB_REF=' + token,
+           '/bin/bash', '-c', 'curl -fsSL --max-time 30 "$0" | bash', url]
+    try:
+        subprocess.check_call(cmd)
+        print("upgrade: started %s" % token)
+    except Exception as e:
+        print("upgrade: failed to start %s: %s" % (token, e))
+
+
 def byte_str(obj):
     if isinstance(obj, str):
         return obj.encode(encoding="utf-8")
@@ -294,6 +404,7 @@ if __name__ == '__main__':
     parse_args()
     socket.setdefaulttimeout(30)
     start_ping_threads()
+    start_info_detection()
     while True:
         try:
             print("Connecting...")
@@ -321,6 +432,7 @@ if __name__ == '__main__':
                 data += more
             if PING_INTERVAL > 0:
                 apply_monitors(data.splitlines())
+            handle_upgrade(data.splitlines())
 
             if data.find("IPv4") > -1:
                 check_ip = 6
@@ -384,6 +496,8 @@ if __name__ == '__main__':
                 array['time_189'] = pingTime['189']
                 array['time_10086'] = pingTime['10086']
                 array['tcp'] = array['udp'] = array['process'] = array['thread'] = 0
+                # 服务端每次用整条上报替换旧值, 所以 custom 每次都要带
+                array['custom'] = agent_custom()
 
                 # separators 去掉多余空格, 每条约省 50 字节
                 s.send(byte_str("update " + json.dumps(array, separators=(',', ':')) + "\n"))

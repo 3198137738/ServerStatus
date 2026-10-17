@@ -283,6 +283,36 @@ update_node() {
     list_nodes
 }
 
+# 远程升级: 把本仓库当前 commit 写进 monitors 的 UPGRADE 项并重启 srv,
+# agent 重连时发现 SHA 变了, 就会从 GitHub 拉这个 commit 的 agent/upgrade.sh 自行升级
+upgrade_agents() {
+    ensure_config
+    local sha cur tmp yn
+    sha=$(git rev-parse HEAD 2>/dev/null)
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { err "取不到当前 commit, 请在 git 仓库里运行"; return; }
+    if ! git branch -r --contains "$sha" 2>/dev/null | grep -q 'origin/'; then
+        err "当前 commit 还没推到远端, agent 下载不到; 请先 git pull 到远端最新版本"
+        return
+    fi
+    echo
+    info "将把所有 agent 升级到: ${bold}$(git log -1 --format='%h %s' "$sha")${plain}"
+    cur=$(jq -r '(.monitors // []) | map(select((.name | ascii_upcase) == "UPGRADE")) | .[0].host // empty' "$CONFIG_FILE")
+    if [ "$cur" = "$sha" ]; then
+        warn "已经下发过这个版本; 每个版本只会触发一次升级, 没升上去的机器请手动执行 upgrade.sh"
+        return
+    fi
+    ask "确认? 所有在线 agent 会在 srv 重启后自动下载并重启 [y/N]:"; read -r yn
+    [[ "$yn" =~ ^[yY]$ ]] || { info "已取消"; return; }
+
+    tmp=$(mktemp)
+    jq --arg sha "$sha" \
+       '.monitors = ((.monitors // []) | map(select((.name | ascii_upcase) != "UPGRADE"))) + [{"name": "UPGRADE", "host": $sha, "interval": 600, "type": "upgrade"}]' \
+       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE" || { err "写入失败"; rm -f "$tmp"; return; }
+    restart_stack
+    ok "已下发。agent 重连后约半分钟内完成升级, 到面板确认都在线即可"
+    printf '%s\n' "${dim}  首次装上本版本的 agent 只记录基线不升级; 从没收到过 UPGRADE 的旧版 agent 需手动执行一次 upgrade.sh${plain}"
+}
+
 menu_loop() {
     ensure_config
     while true; do
@@ -299,6 +329,7 @@ menu_loop() {
         printf '%s\n' "  ${bold}操作菜单${plain}"
         printf '%s\n' "    ${green}1${plain}. 查看节点      ${green}2${plain}. 添加节点"
         printf '%s\n' "    ${green}3${plain}. 删除节点      ${green}4${plain}. 更新节点"
+        printf '%s\n' "    ${green}5${plain}. 远程升级所有 agent"
         printf '%s\n' "    ${green}0${plain}. 退出"
         echo
         ask "请输入操作编号:"; read -r op
@@ -307,6 +338,7 @@ menu_loop() {
             2) add_node;    pause ;;
             3) remove_node; pause ;;
             4) update_node; pause ;;
+            5) upgrade_agents; pause ;;
             0) echo; ok "再见 👋"; exit 0 ;;
             *) echo; err "无效输入，已退出"; exit 1 ;;
         esac
