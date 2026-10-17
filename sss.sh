@@ -149,27 +149,24 @@ list_nodes() {
         warn "暂时没有任何节点，使用「添加节点」开始吧"
         return
     fi
-    printf "  ${bold}%-5s %-18s %-10s %-8s${plain}\n" "ID" "NAME" "LOCATION" "TYPE"
+    # 地区/类型由 agent 自动检测, 只在面板上显示; config.json 里的只是占位/旧值, 不再列出
+    printf "  ${bold}%-5s %s %s${plain}\n" "ID" "$(pad NAME 18)" "月流量起始日"
     line
-    jq -r '.servers | to_entries[] | "\(.key)|\(.value.name)|\(.value.location)|\(.value.type)"' "$CONFIG_FILE" |
-    while IFS='|' read -r id name loc type; do
-        printf "  %-5s %s %-10s %-8s\n" "$id" "$(pad "$name" 18)" "$loc" "$type"
+    jq -r '.servers | to_entries[] | "\(.key)|\(.value.name)|\(.value.monthstart)"' "$CONFIG_FILE" |
+    while IFS='|' read -r id name month; do
+        printf "  %-5s %s %s\n" "$id" "$(pad "$name" 18)" "$month"
     done
 }
 
 show_node_detail() {
-    local idx="$1" name loc type month user pass
+    local idx="$1" name month user pass
     name=$(jq -r ".servers[$idx].name" "$CONFIG_FILE")
-    loc=$(jq -r ".servers[$idx].location" "$CONFIG_FILE")
-    type=$(jq -r ".servers[$idx].type" "$CONFIG_FILE")
     month=$(jq -r ".servers[$idx].monthstart" "$CONFIG_FILE")
     user=$(jq -r ".servers[$idx].username" "$CONFIG_FILE")
     pass=$(jq -r ".servers[$idx].password" "$CONFIG_FILE")
     echo
     line
     printf "  ${bold}[%s] %s${plain}\n" "$idx" "$name"
-    printf "  位置 LOCATION   : %s\n" "$loc"
-    printf "  类型 TYPE       : %s\n" "$type"
     printf "  月流量起始日    : %s\n" "$month"
     printf "  用户名 USER     : %s\n" "$user"
     printf "  密码 PASSWORD   : %s\n" "$pass"
@@ -200,19 +197,18 @@ view_node() {
 
 add_node() {
     ensure_config
-    local name loc type user pass tmp
+    local name user pass tmp
     echo
     ask "请输入节点名字:"; read -r name
     [ -z "$name" ] && { err "名字不能为空"; return; }
-    ask "请输入位置 [us]:"; read -r loc;  loc=${loc:-us}
-    ask "请输入类型 [kvm]:"; read -r type; type=${type:-kvm}
 
     user=$(gen_user)
     pass=$(gen_pass)
 
     tmp=$(mktemp)
-    jq --arg name "$name" --arg loc "$loc" --arg type "$type" --arg user "$user" --arg pass "$pass" \
-       '.servers += [{monthstart:"1",location:$loc,type:$type,name:$name,username:$user,host:$name,password:$pass}] | .servers |= sort_by(.name)' \
+    # 地区/类型由 agent 自动检测上报; 服务端要求这两个字段非空, 填占位 "-"
+    jq --arg name "$name" --arg user "$user" --arg pass "$pass" \
+       '.servers += [{monthstart:"1",location:"-",type:"-",name:$name,username:$user,host:$name,password:$pass}] | .servers |= sort_by(.name)' \
        "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE" || { err "写入 config.json 失败"; rm -f "$tmp"; return; }
 
     ok "添加成功: ${bold}${name}${plain}"
@@ -249,7 +245,7 @@ remove_node() {
 update_node() {
     ensure_config
     list_nodes
-    local count idx oname oloc otype omonth name loc type month tmp
+    local count idx oname omonth name month tmp
     count=$(jq '.servers | length' "$CONFIG_FILE")
     [ "$count" -eq 0 ] && return
     echo
@@ -258,24 +254,20 @@ update_node() {
     [ "$idx" -ge "$count" ] && { err "编号超出范围"; return; }
 
     oname=$(jq -r ".servers[$idx].name" "$CONFIG_FILE")
-    oloc=$(jq -r ".servers[$idx].location" "$CONFIG_FILE")
-    otype=$(jq -r ".servers[$idx].type" "$CONFIG_FILE")
     omonth=$(jq -r ".servers[$idx].monthstart" "$CONFIG_FILE")
 
     printf '%s\n' "${dim}回车保留原值(中括号内为原值)${plain}"
     ask "新名字 [${oname}]:";        read -r name;  name=${name:-$oname}
-    ask "新位置 [${oloc}]:";         read -r loc;   loc=${loc:-$oloc}
-    ask "新类型 [${otype}]:";        read -r type;  type=${type:-$otype}
     ask "月流量起始日 [${omonth}]:"; read -r month; month=${month:-$omonth}
 
-    if [ "$name" = "$oname" ] && [ "$loc" = "$oloc" ] && [ "$type" = "$otype" ] && [ "$month" = "$omonth" ]; then
+    if [ "$name" = "$oname" ] && [ "$month" = "$omonth" ]; then
         info "未做任何更新，直接返回"
         return
     fi
 
     tmp=$(mktemp)
-    jq --arg n "$name" --arg l "$loc" --arg t "$type" --arg m "$month" \
-       ".servers[$idx].name=\$n | .servers[$idx].location=\$l | .servers[$idx].type=\$t | .servers[$idx].monthstart=\$m | .servers |= sort_by(.name)" \
+    jq --arg n "$name" --arg m "$month" \
+       ".servers[$idx].name=\$n | .servers[$idx].monthstart=\$m | .servers |= sort_by(.name)" \
        "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE" || { err "写入失败"; rm -f "$tmp"; return; }
 
     ok "更新成功"
