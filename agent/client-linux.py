@@ -11,6 +11,7 @@
 #   4. 探测目标 DNS 解析失败时不再每次连接都重新解析, 而是每 10 分钟重试一次
 #   5. 网速改为在主循环里按 /proc/net/dev 差值计算, 去掉单独的线程
 #   6. 参数按 KEY=VALUE 精确解析 (原版用子串匹配, PING_INTERVAL 会被当成 INTERVAL)
+#   7. 三网探测改为山西联通/电信/移动, 优先 IPv6, 不通自动退回 IPv4
 #
 # 用法 (参数均可选, 除 SERVER/USER/PASSWORD 外都有默认值):
 #   python3 client-linux.py SERVER=1.2.3.4 USER=s01 PASSWORD=xxx INTERVAL=5 PING_INTERVAL=30
@@ -23,13 +24,14 @@ INTERVAL = 5                  # 上报间隔(秒)
 PING_INTERVAL = 30            # 三网 TCP 探测间隔(秒), 0 = 关闭
 ONLINE_CHECK_INTERVAL = 300   # IPv4/IPv6 连通性检测间隔(秒)
 PROBEPORT = 80
-PROBE_PROTOCOL_PREFER = "ipv4"  # ipv4, ipv6
 PING_PACKET_HISTORY_LEN = 100
 PING_MIN_SAMPLES = 10         # 至少这么多样本才计算丢包率 (原版 30, 间隔拉长后太慢)
-DNS_RETRY_INTERVAL = 600
-CU = "cu.tz.cloudcpp.com"
-CT = "ct.tz.cloudcpp.com"
-CM = "cm.tz.cloudcpp.com"
+DNS_RETRY_INTERVAL = 600      # 每隔这么久重新解析/选择探测目标
+# 三网探测目标: 山西联通/电信/移动 (zstaticcdn)。按顺序选第一个能连通的,
+# v6 域名只有 AAAA、v4 域名只有 A; 本机没有 IPv6 时自动退回 v4
+CU = ("sx-cu-v6.ip.zstaticcdn.com", "sx-cu-v4.ip.zstaticcdn.com")
+CT = ("sx-ct-v6.ip.zstaticcdn.com", "sx-ct-v4.ip.zstaticcdn.com")
+CM = ("sx-cm-v6.ip.zstaticcdn.com", "sx-cm-v4.ip.zstaticcdn.com")
 
 import socket
 import time
@@ -112,23 +114,43 @@ pingTime = {'10010': 0, '189': 0, '10086': 0}
 def _resolve(host):
     if host.count(':') >= 1:    # 纯 IPv6 地址
         return host
-    family = socket.AF_INET if PROBE_PROTOCOL_PREFER == 'ipv4' else socket.AF_INET6
     try:
-        return socket.getaddrinfo(host, None, family)[0][4][0]
+        return socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)[0][4][0]
     except Exception:
         return None
 
 
-def _ping_thread(host, mark, port):
+def _tcp_reachable(ip, port):
+    try:
+        socket.create_connection((ip, port), timeout=2).close()
+        return True
+    except socket.error as error:
+        return error.errno == errno.ECONNREFUSED
+
+
+def _select_target(hosts, port):
+    """返回第一个能连通的候选 IP; 都不通时返回最后一个能解析的, 让丢包率如实反映"""
+    fallback = None
+    for host in hosts:
+        ip = _resolve(host)
+        if ip is None:
+            continue
+        if _tcp_reachable(ip, port):
+            return ip
+        fallback = ip
+    return fallback
+
+
+def _ping_thread(hosts, mark, port):
     lostPacket = 0
     packet_queue = Queue(maxsize=PING_PACKET_HISTORY_LEN)
     IP = None
     last_resolve = 0
 
     while True:
-        # 解析失败时不要把域名直接丢给 create_connection, 否则每次探测都会多一次 DNS 查询
-        if IP is None and time.time() - last_resolve >= DNS_RETRY_INTERVAL:
-            IP = _resolve(host)
+        # 定期重选: IPv6 恢复/CDN 换 IP 都能跟上; 解析失败时也不会每次探测都查 DNS
+        if time.time() - last_resolve >= DNS_RETRY_INTERVAL:
+            IP = _select_target(hosts, port) or IP
             last_resolve = time.time()
         if IP is None:
             time.sleep(PING_INTERVAL)
@@ -159,8 +181,8 @@ def _ping_thread(host, mark, port):
 def start_ping_threads():
     if PING_INTERVAL <= 0:
         return
-    for host, mark in ((CU, '10010'), (CT, '189'), (CM, '10086')):
-        t = threading.Thread(target=_ping_thread, kwargs={'host': host, 'mark': mark, 'port': PROBEPORT})
+    for hosts, mark in ((CU, '10010'), (CT, '189'), (CM, '10086')):
+        t = threading.Thread(target=_ping_thread, kwargs={'hosts': hosts, 'mark': mark, 'port': PROBEPORT})
         t.daemon = True
         t.start()
 
