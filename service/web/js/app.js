@@ -174,17 +174,9 @@
     return cached;
   }
 
-  // CONFIG: 上行 系统 + 架构标签, 下行 核心数 · CPU 型号; 固定宽度省略, 悬停看全文
+  // 展开行的 Config: 系统 · 架构 · 核心数 · CPU 型号, 完整显示不截断
   function configText(a) {
     return [a.os, a.arch, a.cores ? a.cores + ' cores' : '', a.cpu].filter(Boolean).join(' · ');
-  }
-  function configCell(a) {
-    if (!a.os && !a.cpu) return '<span class="cfg"><span class="cfg-os dim">-</span></span>';
-    var cpu = (a.cores ? a.cores + 'C' : '') + (a.cores && a.cpu ? ' · ' : '') + (a.cpu || '');
-    return '<span class="cfg" title="' + esc(configText(a)) + '">' +
-      '<span class="cfg-os"><span class="cfg-name">' + esc(a.os || '-') + '</span>' +
-        (a.arch ? '<span class="cfg-arch">' + esc(a.arch) + '</span>' : '') + '</span>' +
-      '<span class="cfg-cpu">' + esc(cpu || '-') + '</span></span>';
   }
   // 主控 bot 维护的各节点静态信息最后已知值; 先用它填好缓存, 新浏览器第一屏就完整
   function loadMeta() {
@@ -214,6 +206,7 @@
     var hddPct = pct(s.hdd_used, s.hdd_total);
     var mIn = (Number(s.network_in) || 0) - (Number(s.last_network_in) || 0);
     var mOut = (Number(s.network_out) || 0) - (Number(s.last_network_out) || 0);
+    var load = (Number(s.load_1) === -1) ? '–' : Math.max(0, Number(s.load_1) || 0).toFixed(2);
     var cpuVal = Math.max(0, Number(s.cpu) || 0);
     return {
       online: online, cpu: cpuVal, mem: memPct, hdd: hddPct,
@@ -224,7 +217,7 @@
         '<span class="type-tag">' + esc(auto.virt || s.type || '-') + '</span>',
         regionCell(auto.loc || s.location),
         '<span class="mono dim upbox">' + esc(fmtUptime(s.uptime)) + '</span>',
-        configCell(auto),
+        '<span class="mono loadbox">' + load + '</span>',
         '<span class="netbox">' + (online ? vduo(s.network_rx, s.network_tx, humanSpeed) : '<span class="dim">-</span>') + '</span>',
         '<span class="numbox">' + vduo(s.network_in, s.network_out, humanBytes) + '</span>',
         online ? gauge('cpu', cpuVal) : '<span class="dim">-</span>',
@@ -333,12 +326,12 @@
   }
   function seg(label, val) { return '<span class="exseg"><b>' + label + '</b>' + val + '</span>'; }
 
-  function fmtLoad(v) { v = Number(v); return v === -1 || isNaN(v) ? '–' : Math.max(0, v).toFixed(2); }
   function detailHTML(s) {
     var KB = 1024, MB = 1048576;
     var io = humanSpeed(s.io_read) + ' / ' + humanSpeed(s.io_write);
+    var cfg = configText(autoCache[s.name || ''] || {});
     return '<div class="exwrap">'
-      + seg('Load 1|5|15', fmtLoad(s.load_1) + ' / ' + fmtLoad(s.load_5) + ' / ' + fmtLoad(s.load_15))
+      + seg('Config', cfg ? esc(cfg) : '-')
       + seg('Network ↓|↑', humanSpeed(s.network_rx) + ' / ' + humanSpeed(s.network_tx))
       + seg('Memory|Swap', humanBytes((Number(s.memory_used) || 0) * KB) + ' / ' + humanBytes((Number(s.memory_total) || 0) * KB) + ' | ' + humanBytes((Number(s.swap_used) || 0) * KB) + ' / ' + humanBytes((Number(s.swap_total) || 0) * KB))
       + seg('Disk|IO', humanBytes((Number(s.hdd_used) || 0) * MB) + ' / ' + humanBytes((Number(s.hdd_total) || 0) * MB) + ' | ' + io)
