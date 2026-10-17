@@ -12,6 +12,8 @@
 #   5. 网速改为在主循环里按 /proc/net/dev 差值计算, 去掉单独的线程
 #   6. 参数按 KEY=VALUE 精确解析 (原版用子串匹配, PING_INTERVAL 会被当成 INTERVAL)
 #   7. 三网探测改为山西联通/电信/移动, 优先 IPv6, 不通自动退回 IPv4
+#   8. 探测目标可由主控下发: config.json 的 monitors 里 name 为 CU/CT/CM 的项,
+#      host 写逗号分隔的候选(可带 :port), interval 为探测间隔; 改完 restart srv 即生效
 #
 # 用法 (参数均可选, 除 SERVER/USER/PASSWORD 外都有默认值):
 #   python3 client-linux.py SERVER=1.2.3.4 USER=s01 PASSWORD=xxx INTERVAL=5 PING_INTERVAL=30
@@ -110,6 +112,65 @@ def get_network(ip_version):
 lostRate = {'10010': 0.0, '189': 0.0, '10086': 0.0}
 pingTime = {'10010': 0, '189': 0, '10086': 0}
 
+# 主控 config.json 的 monitors 里 name 为 CU/CT/CM 的项会覆盖内置探测目标, 见 apply_monitors()
+MONITOR_MARKS = {'CU': '10010', 'CT': '189', 'CM': '10086'}
+probeTargets = {}
+targetsVersion = 0
+
+
+def _parse_hosts(text):
+    """把 a.com,b.com:8080,[2001:db8::1]:80,2001:db8::2 解析成 [(host, port), ...], 缺省端口 PROBEPORT"""
+    result = []
+    for item in str(text).split(','):
+        item = item.strip()
+        if not item:
+            continue
+        host, port = item, PROBEPORT
+        if item.startswith('['):                     # [IPv6]:port
+            host, _, rest = item[1:].partition(']')
+            if rest.startswith(':') and rest[1:].isdigit():
+                port = int(rest[1:])
+        elif item.count(':') == 1:                   # host:port
+            h, p = item.split(':')
+            if p.isdigit():
+                host, port = h, int(p)
+        result.append((host, port))
+    return result
+
+
+def _default_targets():
+    return dict((mark, {'hosts': _parse_hosts(','.join(hosts)), 'interval': PING_INTERVAL})
+                for hosts, mark in ((CU, '10010'), (CT, '189'), (CM, '10086')))
+
+
+def apply_monitors(lines):
+    """解析主控下发的 monitors 行; 没下发 CU/CT/CM 的那一路用内置默认"""
+    global probeTargets, targetsVersion
+    targets = _default_targets()
+    for line in lines:
+        line = line.strip()
+        if not line.startswith('{'):
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        mark = MONITOR_MARKS.get(str(item.get('name', '')).strip().upper())
+        hosts = _parse_hosts(item.get('host', ''))
+        if mark is None or not hosts:
+            continue
+        try:
+            interval = int(item.get('interval') or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        targets[mark] = {'hosts': hosts, 'interval': interval if interval > 0 else PING_INTERVAL}
+    if targets != probeTargets:
+        probeTargets = targets
+        targetsVersion += 1
+        for name, mark in sorted(MONITOR_MARKS.items()):
+            t = targets[mark]
+            print("probe %s: %s every %ss" % (name, ','.join('%s:%d' % hp for hp in t['hosts']), t['interval']))
+
 
 def _resolve(host):
     if host.count(':') >= 1:    # 纯 IPv6 地址
@@ -128,61 +189,72 @@ def _tcp_reachable(ip, port):
         return error.errno == errno.ECONNREFUSED
 
 
-def _select_target(hosts, port):
-    """返回第一个能连通的候选 IP; 都不通时返回最后一个能解析的, 让丢包率如实反映"""
+def _select_target(hosts):
+    """返回第一个能连通的 (ip, port); 都不通时返回最后一个能解析的, 让丢包率如实反映"""
     fallback = None
-    for host in hosts:
+    for host, port in hosts:
         ip = _resolve(host)
         if ip is None:
             continue
         if _tcp_reachable(ip, port):
-            return ip
-        fallback = ip
+            return ip, port
+        fallback = (ip, port)
     return fallback
 
 
-def _ping_thread(hosts, mark, port):
+def _ping_thread(mark):
     lostPacket = 0
     packet_queue = Queue(maxsize=PING_PACKET_HISTORY_LEN)
-    IP = None
-    last_resolve = 0
+    target = None
+    last_select = 0
+    seen_version = targetsVersion
 
     while True:
+        cfg = probeTargets[mark]
+        if seen_version != targetsVersion:
+            # 主控换了探测目标: 旧目标的样本作废
+            seen_version = targetsVersion
+            lostPacket = 0
+            packet_queue = Queue(maxsize=PING_PACKET_HISTORY_LEN)
+            lostRate[mark], pingTime[mark] = 0.0, 0
+            target, last_select = None, 0
         # 定期重选: IPv6 恢复/CDN 换 IP 都能跟上; 解析失败时也不会每次探测都查 DNS
-        if time.time() - last_resolve >= DNS_RETRY_INTERVAL:
-            IP = _select_target(hosts, port) or IP
-            last_resolve = time.time()
-        if IP is None:
-            time.sleep(PING_INTERVAL)
-            continue
+        if time.time() - last_select >= DNS_RETRY_INTERVAL:
+            target = _select_target(cfg['hosts']) or target
+            last_select = time.time()
 
-        if packet_queue.full():
-            if packet_queue.get() == 0:
-                lostPacket -= 1
-        b = timeit.default_timer()
-        try:
-            socket.create_connection((IP, port), timeout=1).close()
-            pingTime[mark] = int((timeit.default_timer() - b) * 1000)
-            packet_queue.put(1)
-        except socket.error as error:
-            if error.errno == errno.ECONNREFUSED:
+        if target is not None:
+            if packet_queue.full():
+                if packet_queue.get() == 0:
+                    lostPacket -= 1
+            b = timeit.default_timer()
+            try:
+                socket.create_connection(target, timeout=1).close()
                 pingTime[mark] = int((timeit.default_timer() - b) * 1000)
                 packet_queue.put(1)
-            else:
-                lostPacket += 1
-                packet_queue.put(0)
+            except socket.error as error:
+                if error.errno == errno.ECONNREFUSED:
+                    pingTime[mark] = int((timeit.default_timer() - b) * 1000)
+                    packet_queue.put(1)
+                else:
+                    lostPacket += 1
+                    packet_queue.put(0)
 
-        if packet_queue.qsize() >= PING_MIN_SAMPLES:
-            lostRate[mark] = float(lostPacket) / packet_queue.qsize()
+            if packet_queue.qsize() >= PING_MIN_SAMPLES:
+                lostRate[mark] = float(lostPacket) / packet_queue.qsize()
 
-        time.sleep(PING_INTERVAL)
+        # 分段睡眠, 目标变更时不必等满一个(可能很长的)间隔
+        deadline = time.time() + cfg['interval']
+        while time.time() < deadline and seen_version == targetsVersion:
+            time.sleep(min(1, max(0, deadline - time.time())))
 
 
 def start_ping_threads():
     if PING_INTERVAL <= 0:
         return
-    for hosts, mark in ((CU, '10010'), (CT, '189'), (CM, '10086')):
-        t = threading.Thread(target=_ping_thread, kwargs={'hosts': hosts, 'mark': mark, 'port': PROBEPORT})
+    apply_monitors([])
+    for mark in MONITOR_MARKS.values():
+        t = threading.Thread(target=_ping_thread, kwargs={'mark': mark})
         t.daemon = True
         t.start()
 
@@ -241,6 +313,14 @@ if __name__ == '__main__':
             if data.find("You are connecting via") < 0:
                 data = byte_str(s.recv(1024))
                 print(data)
+            # cppla 2.0 服务端紧跟着下发 monitors (每行一个 JSON), 可能被拆成多个包
+            while data and not data.endswith('\n'):
+                more = byte_str(s.recv(1024))
+                if not more:
+                    break
+                data += more
+            if PING_INTERVAL > 0:
+                apply_monitors(data.splitlines())
 
             if data.find("IPv4") > -1:
                 check_ip = 6

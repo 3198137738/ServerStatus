@@ -109,6 +109,26 @@ curl -fsSL https://raw.githubusercontent.com/3198137738/ServerStatus/master/agen
 curl -fsSL https://raw.githubusercontent.com/3198137738/ServerStatus/master/agent/upgrade.sh | sudo INTERVAL=10 PING_INTERVAL=0 bash
 ```
 
+# 在主控上修改 CU/CT/CM 探测目标
+
+agent 内置的是山西联通/电信/移动(优先 IPv6, 不通自动退回 IPv4)。想换目标不用登录被监控机,
+在主控的 `config.json` 里加 `monitors`(name 为 `CU`/`CT`/`CM`), 然后重启 srv, agent 重连时就会拿到新目标:
+
+```bash
+cd /opt/serverstatus/sss    # 你的面板目录
+jq '.monitors = ((.monitors // []) | map(select((.name | ascii_upcase) as $n | ["CU","CT","CM"] | index($n) | not))) + [
+  {"name":"CU","host":"sx-cu-v6.ip.zstaticcdn.com,sx-cu-v4.ip.zstaticcdn.com","interval":30,"type":"tcp"},
+  {"name":"CT","host":"sx-ct-v6.ip.zstaticcdn.com,sx-ct-v4.ip.zstaticcdn.com","interval":30,"type":"tcp"},
+  {"name":"CM","host":"sx-cm-v6.ip.zstaticcdn.com,sx-cm-v4.ip.zstaticcdn.com","interval":30,"type":"tcp"}
+]' config.json > config.json.tmp && mv config.json.tmp config.json
+docker compose restart srv
+```
+
+- `host`: 逗号分隔的候选, 按顺序用第一个 TCP 能连通的; 可写 `host:port` / `[IPv6]:port`, 缺省 80
+- `interval`: 探测间隔(秒), **一定要写**, 不写服务端会默认成 600
+- 删掉某项(或整个 `monitors`)再重启 srv, 那一路就回到 agent 内置的默认目标
+- 需要 agent 是低流量版(`upgrade.sh` 装的), 且启动参数 `PING_INTERVAL` 不为 0
+
 更多信息请移步 https://lidalao.com/archives/87  +1ip
 
 挺好用的？送作者一杯可乐？->
