@@ -146,9 +146,22 @@ table { width: 100%; border-collapse: collapse; white-space: nowrap; }
 .netbox { display: inline-block; width: 70px; overflow: hidden; }
 /* MONTHLY / TRAFFIC: 累计流量数值也会随位数增减改变宽度, 同样钉死 */
 .numbox { display: inline-block; width: 58px; overflow: hidden; }
-/* UPTIME / LOAD: 时长与负载位数也会变, 钉死防抖 */
+/* UPTIME: 时长位数会变, 钉死防抖 */
 .upbox   { display: inline-block; width: 62px; overflow: hidden; }
-.loadbox { display: inline-block; width: 44px; overflow: hidden; }
+
+/* CONFIG: 上行 系统+架构, 下行 核心数·CPU 型号; 定宽省略, 完整信息在 title 和展开行里 */
+.cfg { display: inline-flex; flex-direction: column; gap: 2px; width: 180px; line-height: 1.2; vertical-align: middle; }
+.cfg-os { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cfg-name { color: var(--text); font-size: 12px; min-width: 0; }
+.cfg-arch {
+  flex: none;
+  font-family: var(--mono); font-size: 9.5px; line-height: 1;
+  padding: 2px 4px; border-radius: 3px;
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
+}
+.cfg-cpu { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.cfg-cpu, .cfg-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 thead th {
   position: sticky; top: 0;
@@ -267,17 +280,18 @@ tr.exrow > td {
 .exseg b { color: var(--text-faint); font-weight: 700; margin-right: 8px; }
 
 /* ---------- responsive: 移动端只保留主要信息并缩小(参考 mobile.png) ---------- */
-/* 中屏: 隐藏 MONTHLY(3) TRAFFIC(9) CU/CT/CM(13-15) */
+/* 中屏: 隐藏 MONTHLY(3) CONFIG(7) TRAFFIC(9) CU/CT/CM(13-15); CONFIG 是静态信息, 展开行里有完整版 */
 @media (max-width: 920px) {
   #grid { min-width: 0; }   /* 列减少后铺满即可, 不再强制横向滚动 */
   #grid th:nth-child(3),  #grid td:nth-child(3),
+  #grid th:nth-child(7),  #grid td:nth-child(7),
   #grid th:nth-child(9),  #grid td:nth-child(9),
   #grid th:nth-child(13), #grid td:nth-child(13),
   #grid th:nth-child(14), #grid td:nth-child(14),
   #grid th:nth-child(15), #grid td:nth-child(15) { display: none; }
   .topbar, .wrap { padding-left: 14px; padding-right: 14px; }
 }
-/* 窄屏(手机): 再隐藏 PROTO(2) TYPE(4) REGION(5) UPTIME(6), 保留 节点/负载/网络/CPU/内存/硬盘 */
+/* 窄屏(手机): 再隐藏 PROTO(2) TYPE(4) REGION(5) UPTIME(6), 保留 节点/网络/CPU/内存/硬盘 */
 @media (max-width: 640px) {
   #grid th:nth-child(2), #grid td:nth-child(2),
   #grid th:nth-child(4), #grid td:nth-child(4),

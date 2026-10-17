@@ -20,6 +20,8 @@
 #      用 systemd-run 在独立单元里执行该 commit 的 agent/upgrade.sh
 #  11. 恢复 tcp/udp/进程/线程数(上面 20211117 那次被置 0), 改为读 /proc/net/sockstat 和 /proc/loadavg
 #  12. 上报磁盘读写速度 io_read/io_write: /proc/diskstats 中物理磁盘扇区数的差值
+#  13. 上报系统(os)、CPU 型号(cpu_model)、核心数(cpu_cores)、架构(custom 里的 arch);
+#      这些和地区/类型一样只在连接后、每 60s 或变化时发送, 中间的上报不带
 #
 # 用法 (参数均可选, 除 SERVER/USER/PASSWORD 外都有默认值):
 #   python3 client-linux.py SERVER=1.2.3.4 USER=s01 PASSWORD=xxx INTERVAL=5 PING_INTERVAL=30
@@ -331,7 +333,7 @@ def start_ping_threads():
         t.start()
 
 
-agentInfo = {'loc': '', 'virt': ''}
+agentInfo = {'loc': '', 'virt': '', 'arch': ''}
 # 直接显示 systemd-detect-virt 的原始值 (kvm/amazon/microsoft/xen/openvz/lxc...), 只把物理机的 none 改成 dedicated
 VIRT_ALIASES = {'none': 'dedicated'}
 
@@ -375,15 +377,113 @@ def _location_thread():
         time.sleep(LOCATION_REFRESH if loc else 600)
 
 
+def _read_kv(path, sep):
+    """读 key<sep>value 格式的文件, 键转小写、同名只取第一个"""
+    result = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                if sep not in line:
+                    continue
+                k, v = line.split(sep, 1)
+                k, v = k.strip().lower(), v.strip().strip('"\'')
+                if v and k not in result:
+                    result[k] = v
+    except (IOError, OSError):
+        pass
+    return result
+
+
+# os-release 的 NAME 往往很长, 面板只要能一眼认出发行版
+OS_SHORT = (
+    ('red hat enterprise linux', 'RHEL'), ('oracle linux', 'Oracle'), ('amazon linux', 'Amazon'),
+    ('centos stream', 'CentOS Stream'), ('almalinux', 'Alma'), ('rocky', 'Rocky'), ('opensuse', 'openSUSE'),
+)
+
+
+def get_os_name():
+    """如 Ubuntu 22.04 / Debian 12 / CentOS 7 / Alma 9 / Arch"""
+    rel = _read_kv('/etc/os-release', '=')
+    name = rel.get('name') or rel.get('id') or 'Linux'
+    low = name.lower()
+    for key, short in OS_SHORT:
+        if low.startswith(key):
+            name = short
+            break
+    else:
+        name = re.sub(r'\s+(GNU/)?Linux(\s+Server)?$', '', name, flags=re.I).strip() or name
+    ver = rel.get('version_id', '')
+    return ('%s %s' % (name, ver)).strip()[:32]
+
+
+def _shorten_cpu(model):
+    """AMD EPYC 7551 32-Core Processor -> AMD EPYC 7551; Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz -> Intel Xeon Platinum 8259CL"""
+    m = re.sub(r'\((R|TM|tm|r)\)', '', model)
+    if re.search(r'QEMU|KVM|Virtual', m):
+        # 虚拟 CPU 的 CPU/processor 是名字本身(QEMU Virtual CPU / Common KVM processor), 只去掉版本号
+        return re.sub(r'\s+version\s.*$', '', re.sub(r'\s+', ' ', m)).strip()[:48]
+    m = re.sub(r'@\s*[\d.]+\s*[GM]Hz', '', m)
+    m = re.sub(r'\b\d+-Core\b|\bProcessor\b|\bCPU\b|\bwith Radeon.*$', '', m, flags=re.I)
+    return re.sub(r'\s+', ' ', m).strip()[:48]
+
+
+def get_cpu_model():
+    cpuinfo = _read_kv('/proc/cpuinfo', ':')
+    model = cpuinfo.get('model name', '')
+    if not model or model.isdigit():
+        # ARM 的 /proc/cpuinfo 没有 model name, lscpu 能给出 Neoverse-N1 这类核心名
+        try:
+            out = subprocess.check_output(['lscpu'], stderr=open(os.devnull, 'w')).decode('utf-8', 'ignore')
+            info = {}
+            for line in out.splitlines():
+                if ':' in line:
+                    k, v = line.split(':', 1)
+                    info.setdefault(k.strip().lower(), v.strip())
+            model = info.get('model name', '')
+            vendor = info.get('vendor id', '')
+            if model and vendor and not model.lower().startswith(vendor.lower()) and vendor.isalpha():
+                model = '%s %s' % (vendor, model)        # ARM Neoverse-N1
+        except Exception:
+            model = cpuinfo.get('hardware', '')
+    return _shorten_cpu(model) if model and model != '-' else ''
+
+
+def get_cpu_cores():
+    try:
+        with open('/proc/stat') as f:
+            n = sum(1 for line in f if re.match(r'^cpu\d+\s', line))
+        if n:
+            return n
+    except (IOError, OSError):
+        pass
+    try:
+        import multiprocessing
+        return multiprocessing.cpu_count()
+    except Exception:
+        return 0
+
+
+def get_arch():
+    arch = os.uname()[4].lower()
+    return {'aarch64': 'arm64', 'amd64': 'x86_64', 'i686': 'x86', 'i386': 'x86'}.get(arch, arch)
+
+
+# 系统/CPU 这类几乎不变的信息, 连接后先发一次, 之后每 STATIC_REFRESH 秒或内容变化时再发
+STATIC_REFRESH = 60
+staticInfo = {'os': '', 'cpu_model': '', 'cpu_cores': 0}
+
+
 def start_info_detection():
     agentInfo['virt'] = detect_virt()
+    agentInfo['arch'] = get_arch()
+    staticInfo.update(os=get_os_name(), cpu_model=get_cpu_model(), cpu_cores=get_cpu_cores())
     t = threading.Thread(target=_location_thread)
     t.daemon = True
     t.start()
 
 
 def agent_custom():
-    return ';'.join('%s=%s' % (k, agentInfo[k]) for k in ('loc', 'virt') if agentInfo[k])
+    return ';'.join('%s=%s' % (k, agentInfo[k]) for k in ('loc', 'virt', 'arch') if agentInfo.get(k))
 
 
 UPGRADE_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'upgrade.token')
@@ -506,6 +606,7 @@ if __name__ == '__main__':
                 raise socket.error
 
             last_online_check = 0
+            last_static, last_custom = 0, None     # 新连接: 第一条上报就带上静态信息
             prev_cpu = get_cpu_times()
             prev_rx, prev_tx = get_net_bytes()
             prev_dr, prev_dw = get_disk_bytes()
@@ -568,8 +669,15 @@ if __name__ == '__main__':
                 array['time_189'] = pingTime['189']
                 array['time_10086'] = pingTime['10086']
                 array['tcp'], array['udp'], array['process'], array['thread'] = get_tupd()
-                # 服务端每次用整条上报替换旧值, 所以 custom 每次都要带
-                array['custom'] = agent_custom()
+                # 静态信息只在连接后/每 STATIC_REFRESH 秒/内容变化(如地区检测完成)时发, 省流量;
+                # 中间的上报里这些字段为空, 面板用浏览器缓存的上一次值
+                custom = agent_custom()
+                if now - last_static >= STATIC_REFRESH or custom != last_custom:
+                    array['custom'] = custom
+                    array['os'] = staticInfo['os']
+                    array['cpu_model'] = staticInfo['cpu_model']
+                    array['cpu_cores'] = staticInfo['cpu_cores']
+                    last_static, last_custom = now, custom
 
                 # separators 去掉多余空格, 每条约省 50 字节
                 s.send(byte_str("update " + json.dumps(array, separators=(',', ':')) + "\n"))

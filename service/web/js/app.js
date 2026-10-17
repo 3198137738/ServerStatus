@@ -156,18 +156,35 @@
   })();
   var autoDirty = false;
 
+  // agent 只在连接后/每 60s 发这些几乎不变的字段(省流量), 中间的上报为空, 所以逐字段合并进缓存
+  var AUTO_FIELDS = ['loc', 'virt', 'arch', 'os', 'cpu', 'cores'];
   function autoInfo(s) {
     var name = s.name || '', got = {};
     String(s.custom || '').split(';').forEach(function (kv) {
       var i = kv.indexOf('=');
       if (i > 0) got[kv.slice(0, i)] = kv.slice(i + 1);
     });
-    var cached = autoCache[name] || {};
-    if ((got.loc && got.loc !== cached.loc) || (got.virt && got.virt !== cached.virt)) {
-      autoCache[name] = { loc: got.loc || cached.loc, virt: got.virt || cached.virt };
-      autoDirty = true;
-    }
-    return autoCache[name] || {};
+    if (s.os) got.os = String(s.os);
+    if (s.cpu_model) got.cpu = String(s.cpu_model);
+    if (Number(s.cpu_cores) > 0) got.cores = Number(s.cpu_cores);
+    var cached = autoCache[name] || (autoCache[name] = {});
+    AUTO_FIELDS.forEach(function (k) {
+      if (got[k] && got[k] !== cached[k]) { cached[k] = got[k]; autoDirty = true; }
+    });
+    return cached;
+  }
+
+  // CONFIG: 上行 系统 + 架构标签, 下行 核心数 · CPU 型号; 固定宽度省略, 悬停看全文
+  function configText(a) {
+    return [a.os, a.arch, a.cores ? a.cores + ' cores' : '', a.cpu].filter(Boolean).join(' · ');
+  }
+  function configCell(a) {
+    if (!a.os && !a.cpu) return '<span class="cfg"><span class="cfg-os dim">-</span></span>';
+    var cpu = (a.cores ? a.cores + 'C' : '') + (a.cores && a.cpu ? ' · ' : '') + (a.cpu || '');
+    return '<span class="cfg" title="' + esc(configText(a)) + '">' +
+      '<span class="cfg-os"><span class="cfg-name">' + esc(a.os || '-') + '</span>' +
+        (a.arch ? '<span class="cfg-arch">' + esc(a.arch) + '</span>' : '') + '</span>' +
+      '<span class="cfg-cpu">' + esc(cpu || '-') + '</span></span>';
   }
   function saveAutoCache() {
     if (!autoDirty) return;
@@ -182,7 +199,6 @@
     var hddPct = pct(s.hdd_used, s.hdd_total);
     var mIn = (Number(s.network_in) || 0) - (Number(s.last_network_in) || 0);
     var mOut = (Number(s.network_out) || 0) - (Number(s.last_network_out) || 0);
-    var load = (Number(s.load_1) === -1) ? '–' : Math.max(0, Number(s.load_1) || 0).toFixed(2);
     var cpuVal = Math.max(0, Number(s.cpu) || 0);
     return {
       online: online, cpu: cpuVal, mem: memPct, hdd: hddPct,
@@ -193,7 +209,7 @@
         '<span class="type-tag">' + esc(auto.virt || s.type || '-') + '</span>',
         regionCell(auto.loc || s.location),
         '<span class="mono dim upbox">' + esc(fmtUptime(s.uptime)) + '</span>',
-        '<span class="mono loadbox">' + load + '</span>',
+        configCell(auto),
         '<span class="netbox">' + (online ? vduo(s.network_rx, s.network_tx, humanSpeed) : '<span class="dim">-</span>') + '</span>',
         '<span class="numbox">' + vduo(s.network_in, s.network_out, humanBytes) + '</span>',
         online ? gauge('cpu', cpuVal) : '<span class="dim">-</span>',
@@ -302,10 +318,14 @@
   }
   function seg(label, val) { return '<span class="exseg"><b>' + label + '</b>' + val + '</span>'; }
 
+  function fmtLoad(v) { v = Number(v); return v === -1 || isNaN(v) ? '–' : Math.max(0, v).toFixed(2); }
   function detailHTML(s) {
     var KB = 1024, MB = 1048576;
     var io = humanSpeed(s.io_read) + ' / ' + humanSpeed(s.io_write);
+    var sys = configText(autoCache[s.name || ''] || {});
     return '<div class="exwrap">'
+      + (sys ? seg('System', esc(sys)) : '')
+      + seg('Load 1|5|15', fmtLoad(s.load_1) + ' / ' + fmtLoad(s.load_5) + ' / ' + fmtLoad(s.load_15))
       + seg('Network ↓|↑', humanSpeed(s.network_rx) + ' / ' + humanSpeed(s.network_tx))
       + seg('Memory|Swap', humanBytes((Number(s.memory_used) || 0) * KB) + ' / ' + humanBytes((Number(s.memory_total) || 0) * KB) + ' | ' + humanBytes((Number(s.swap_used) || 0) * KB) + ' / ' + humanBytes((Number(s.swap_total) || 0) * KB))
       + seg('Disk|IO', humanBytes((Number(s.hdd_used) || 0) * MB) + ' / ' + humanBytes((Number(s.hdd_total) || 0) * MB) + ' | ' + io)
