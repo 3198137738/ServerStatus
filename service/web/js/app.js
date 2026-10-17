@@ -366,6 +366,14 @@
   // ETag/Last-Modified 变了就 reload。只取响应头, 没有正文
   var ASSETS = ['js/app.js', 'css/app.css'];
   var assetSig = {};
+  // 10 分钟内最多自动刷新一次: 万一中间缓存异常导致刷新后仍是旧版, 也不会每分钟反复刷新
+  function safeReload() {
+    var last = 0;
+    try { last = Number(sessionStorage.getItem('assetReloadAt')) || 0; } catch (e) { /* 隐私模式 */ }
+    if (Date.now() - last < 600000) return;
+    try { sessionStorage.setItem('assetReloadAt', String(Date.now())); } catch (e) { /* 隐私模式 */ }
+    location.reload();
+  }
   function checkAssets() {
     ASSETS.forEach(function (url) {
       fetch(url + '?_=' + Date.now(), { method: 'HEAD', cache: 'no-store' })
@@ -373,7 +381,7 @@
           if (!r.ok) return;
           var sig = r.headers.get('ETag') || r.headers.get('Last-Modified');
           if (!sig) return;
-          if (assetSig[url] && assetSig[url] !== sig) location.reload();
+          if (assetSig[url] && assetSig[url] !== sig) safeReload();
           assetSig[url] = sig;
         })
         .catch(function () { /* 网络抖动, 下次再查 */ });
