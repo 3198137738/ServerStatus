@@ -324,7 +324,7 @@
     t = Number(t); l = Number(l);
     return (isNaN(t) ? 0 : t) + 'ms (' + (isNaN(l) ? 0 : Math.round(l)) + '%)';
   }
-  function seg(label, val) { return '<span class="exseg"><b>' + label + '</b>' + val + '</span>'; }
+  function seg(label, val) { return '<span class="exseg"><b>' + label + '</b><span>' + val + '</span></span>'; }
 
   function detailHTML(s) {
     var KB = 1024, MB = 1048576;

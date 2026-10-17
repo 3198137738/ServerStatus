@@ -253,15 +253,24 @@ tr.exrow > td {
   background: var(--surface-alt);
   border-bottom: 1px solid var(--border-strong);
 }
+/* 展开行用固定网格: 每行 3 组「标签 | 数值」, 各节点同一套列宽, 标签和数值按列左对齐;
+   原先 flex-wrap + 居中时, 数值长短不同会让每个节点的各项起点都不一样 */
 .exwrap {
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 30px;
+  display: grid;
+  /* 第 1 组 Config / Disk|IO 内容最长, 多分宽度; 第 2 组 Network / TCP… 最短 */
+  grid-template-columns: max-content minmax(0, 1.6fr) max-content minmax(0, 1fr) max-content minmax(0, 1.3fr);
+  gap: 8px 10px;
   padding: 12px 18px;
   font-family: var(--mono); font-size: 12px;
   color: var(--text-dim);
   white-space: normal;
-  text-align: center;
+  text-align: left;
 }
-.exseg b { color: var(--text-faint); font-weight: 700; margin-right: 8px; }
+.exseg { display: contents; }           /* 让标签和数值直接成为网格单元 */
+.exseg b { color: var(--text-faint); font-weight: 700; white-space: nowrap; }
+.exseg > span { min-width: 0; padding-right: 22px; overflow-wrap: anywhere; }
+@media (max-width: 920px) { .exwrap { grid-template-columns: repeat(2, max-content minmax(0, 1fr)); } }
+@media (max-width: 640px) { .exwrap { grid-template-columns: max-content minmax(0, 1fr); } }
 
 /* ---------- responsive: 移动端只保留主要信息并缩小(参考 mobile.png) ---------- */
 /* 中屏: 隐藏 MONTHLY(3) TRAFFIC(9) CU/CT/CM(13-15) */
