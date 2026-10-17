@@ -19,6 +19,7 @@
 #  10. 远程升级: monitors 里 name 为 UPGRADE、host 为 40 位 commit SHA 的项变化时,
 #      用 systemd-run 在独立单元里执行该 commit 的 agent/upgrade.sh
 #  11. 恢复 tcp/udp/进程/线程数(上面 20211117 那次被置 0), 改为读 /proc/net/sockstat 和 /proc/loadavg
+#  12. 上报磁盘读写速度 io_read/io_write: /proc/diskstats 中物理磁盘扇区数的差值
 #
 # 用法 (参数均可选, 除 SERVER/USER/PASSWORD 外都有默认值):
 #   python3 client-linux.py SERVER=1.2.3.4 USER=s01 PASSWORD=xxx INTERVAL=5 PING_INTERVAL=30
@@ -123,6 +124,37 @@ def get_tupd():
     except (IOError, OSError, ValueError, IndexError):
         thread = 0
     return _sockstat_inuse('TCP'), _sockstat_inuse('UDP'), process, thread
+
+
+# 只统计整块磁盘: 分区会和所在磁盘重复计数, dm-*/md* 是叠在物理盘上的 LVM/RAID, loop/ram/zram/光驱不是真实磁盘
+DISK_SKIP = ('loop', 'ram', 'zram', 'sr', 'fd', 'dm-', 'md')
+
+
+def get_disk_bytes():
+    """所有物理磁盘的累计 (读取字节, 写入字节); /proc/diskstats 的扇区数恒按 512 字节计"""
+    try:
+        disks = set(d for d in os.listdir('/sys/block') if not d.startswith(DISK_SKIP))
+    except OSError:
+        disks = None
+    read = write = 0
+    try:
+        with open('/proc/diskstats') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 10:
+                    continue
+                name = parts[2]
+                if disks is None:
+                    # 没有 /sys/block 时退而按名字过滤, 分区可能会重复计数
+                    if name.startswith(DISK_SKIP):
+                        continue
+                elif name not in disks:
+                    continue
+                read += int(parts[5]) * 512
+                write += int(parts[9]) * 512
+    except (IOError, OSError, ValueError):
+        pass
+    return read, write
 
 
 def get_net_bytes():
@@ -476,6 +508,7 @@ if __name__ == '__main__':
             last_online_check = 0
             prev_cpu = get_cpu_times()
             prev_rx, prev_tx = get_net_bytes()
+            prev_dr, prev_dw = get_disk_bytes()
             prev_clock = time.time()
 
             while True:
@@ -494,6 +527,12 @@ if __name__ == '__main__':
                 netrx = int((NET_IN - prev_rx) / diff)
                 nettx = int((NET_OUT - prev_tx) / diff)
                 prev_rx, prev_tx, prev_clock = NET_IN, NET_OUT, now
+
+                # 磁盘读写速度, 同样取间隔内平均值; 计数器回绕/换盘时按 0 处理
+                disk_r, disk_w = get_disk_bytes()
+                io_read = max(0, int((disk_r - prev_dr) / diff))
+                io_write = max(0, int((disk_w - prev_dw) / diff))
+                prev_dr, prev_dw = disk_r, disk_w
 
                 Load_1, Load_5, Load_15 = os.getloadavg()
                 MemoryTotal, MemoryUsed, SwapTotal, SwapFree = get_memory()
@@ -519,6 +558,8 @@ if __name__ == '__main__':
                 array['network_tx'] = nettx
                 array['network_in'] = NET_IN
                 array['network_out'] = NET_OUT
+                array['io_read'] = io_read
+                array['io_write'] = io_write
                 array['ip_status'] = True
                 array['ping_10010'] = lostRate['10010'] * 100
                 array['ping_189'] = lostRate['189'] * 100
