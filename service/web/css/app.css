@@ -256,9 +256,6 @@ tr.empty td { text-align: center; color: var(--text-dim); padding: 40px; }
 .ping.mid  .p-loss { color: var(--warn); }
 .ping.bad  .p-loss { color: var(--bad); }
 
-.foot { text-align: center; color: var(--text-faint); font-size: 12px; padding: 18px 0 0; }
-.foot a { color: var(--text-dim); text-decoration: none; }
-.foot a:hover { color: var(--accent); }
 
 /* ---------- expandable detail row (老站手风琴式: 点击行就地展开) ---------- */
 tbody tr.row { cursor: pointer; }
