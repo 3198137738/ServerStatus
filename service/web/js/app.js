@@ -186,6 +186,21 @@
         (a.arch ? '<span class="cfg-arch">' + esc(a.arch) + '</span>' : '') + '</span>' +
       '<span class="cfg-cpu">' + esc(cpu || '-') + '</span></span>';
   }
+  // 主控 bot 维护的各节点静态信息最后已知值; 先用它填好缓存, 新浏览器第一屏就完整
+  function loadMeta() {
+    return fetch('meta/nodes.json?_=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : {}; })
+      .then(function (meta) {
+        Object.keys(meta || {}).forEach(function (name) {
+          var cached = autoCache[name] || (autoCache[name] = {});
+          AUTO_FIELDS.forEach(function (k) {
+            var v = meta[name][k];
+            if (v && v !== cached[k]) { cached[k] = v; autoDirty = true; }
+          });
+        });
+      })
+      .catch(function () { /* 没有 meta(如 bot 未运行)就退回逐步填充 */ });
+  }
   function saveAutoCache() {
     if (!autoDirty) return;
     autoDirty = false;
@@ -391,7 +406,7 @@
   /* ----------------- boot ----------------- */
   initTheme();
   initExpand();
-  tick();
+  loadMeta().then(tick);
   setInterval(tick, 5000);   // agent 每 5s 上报一次, 拉得再勤也只是重复数据
   checkAssets();
   setInterval(checkAssets, 60000);

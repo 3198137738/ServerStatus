@@ -18,17 +18,20 @@ services:
       context: ./service/web
     restart: unless-stopped
     volumes:
-      - ./json:/usr/share/nginx/html/json:ro
+      # /json/ 已反代到 srv; meta/nodes.json 是 bot 写的节点静态信息缓存
+      - ./meta:/usr/share/nginx/html/meta:ro
     ports:
       - ${WEB_PORT:-8081}:80
     depends_on:
       - srv
 
-  # Telegram 上下线通知
+  # Telegram 上下线通知 + 维护 meta/nodes.json(节点地区/类型/系统/CPU 的最后已知值)
   bot:
     build:
       context: ./service/bot
     restart: unless-stopped
+    volumes:
+      - ./meta:/meta
     depends_on:
       - srv
     environment:
