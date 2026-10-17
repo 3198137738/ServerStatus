@@ -337,9 +337,7 @@
   function detailHTML(s) {
     var KB = 1024, MB = 1048576;
     var io = humanSpeed(s.io_read) + ' / ' + humanSpeed(s.io_write);
-    var sys = configText(autoCache[s.name || ''] || {});
     return '<div class="exwrap">'
-      + (sys ? seg('System', esc(sys)) : '')
       + seg('Load 1|5|15', fmtLoad(s.load_1) + ' / ' + fmtLoad(s.load_5) + ' / ' + fmtLoad(s.load_15))
       + seg('Network ↓|↑', humanSpeed(s.network_rx) + ' / ' + humanSpeed(s.network_tx))
       + seg('Memory|Swap', humanBytes((Number(s.memory_used) || 0) * KB) + ' / ' + humanBytes((Number(s.memory_total) || 0) * KB) + ' | ' + humanBytes((Number(s.swap_used) || 0) * KB) + ' / ' + humanBytes((Number(s.swap_total) || 0) * KB))
